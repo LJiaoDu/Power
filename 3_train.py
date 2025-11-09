@@ -169,7 +169,7 @@ def train_val(cfg):
         writer.add_scalar("LearningRate", lr, epoch_i)
 
 
-        # 保存最新的检查点
+        # 保存每个epoch的检查点
         checkpoint = {
             'epoch': epoch_i,
             'model_state_dict': model.state_dict(),
@@ -178,13 +178,13 @@ def train_val(cfg):
             'val_loss': val_loss,
             'patience_counter': patience_counter
         }
-        torch.save(checkpoint, "checkpoint_latest.pth")
+        torch.save(checkpoint, f"checkpoint_epoch{epoch_i}.pth")
 
         # 保存最佳检查点和早停机制
         if val_loss < best_val_loss:
             best_val_loss = val_loss
             patience_counter = 0
-            torch.save(checkpoint, "best_checkpoint.pth")
+            torch.save(checkpoint, f"best_checkpoint_epoch{epoch_i}.pth")
             print(f"✓ Saved best checkpoint at epoch {epoch_i} (Val Loss: {val_loss:.4f})")
         else:
             patience_counter += 1
