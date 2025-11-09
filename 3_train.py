@@ -1,8 +1,5 @@
 import torch
-import torch.distributed as dist
 from torch.utils.data import Dataset, DataLoader
-from torch.utils.data.distributed import DistributedSampler
-from torch.nn.parallel import DistributedDataParallel as DDP
 from dnn_model import TFMModel as Model
 from tqdm import tqdm
 import argparse
@@ -59,15 +56,10 @@ def train_val(cfg):
     train_dataloader = DataLoader(train_data, batch_size=cfg.batch_size, shuffle=True, num_workers=cfg.num_workers, pin_memory=True)
     val_dataloader = DataLoader(val_data, batch_size=cfg.batch_size, shuffle=False, num_workers=cfg.num_workers, pin_memory=True)
 
-    #model = Model(in_seq_len=240, out_seq_len=48, in_feat_size = 3, out_feat_size = 1, hidden_feat_size = 256).to(device)
     model = Model(cfg).to(device)
-
-    # optimizer = torch.optim.SGD(model.parameters(), lr=cfg.lr_init)
     optimizer = torch.optim.AdamW(model.parameters(), lr=cfg.lr_init)
 
-    # 学习率衰减策略
-    # lf = lambda x: (1 - x / cfg.epochs) * (1.0 - cfg.lr_final) + cfg.lr_final
-    # scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=lf)
+    # 学习率衰减策略：warmup + cosine annealing
     warmup_epochs = 5
     main_epochs = cfg.epochs - warmup_epochs
     scheduler = SequentialLR(
@@ -81,6 +73,8 @@ def train_val(cfg):
     writer = SummaryWriter(f"runs/exp_{time.strftime('%Y%m%d-%H%M%S')}")
     start_epoch = 0
     best_val_loss = float("inf")
+    patience = 10  # 早停的耐心值
+    patience_counter = 0
 
     if cfg.resume and os.path.isfile(cfg.resume):
         print(f"=> loading checkpoint '{cfg.resume}'")
@@ -89,14 +83,12 @@ def train_val(cfg):
         optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
         scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
         start_epoch = checkpoint['epoch'] + 1
-        best_val_loss = checkpoint['val_loss']
+        best_val_loss = checkpoint.get('val_loss', float("inf"))
+        patience_counter = checkpoint.get('patience_counter', 0)
         print(f"=> loaded checkpoint (epoch {checkpoint['epoch']})")
-    global_step = 0
 
     for epoch_i in range(start_epoch, cfg.epochs):
         model.train()
-
-        loss_sum = 0
         loss_sum_epoch = 0   # 统计整个 epoch 的累计 loss
 
         pbar = tqdm(train_dataloader, desc=f"Epoch {epoch_i} [Train]", ncols=100)
@@ -106,16 +98,10 @@ def train_val(cfg):
 
             optimizer.zero_grad()
 
-            predicted_power = model(history_data, future_power.unsqueeze(2))  # Transformer
-            loss = loss_function(predicted_power, future_power.unsqueeze(2))  # Transformer
+            predicted_power = model(history_data, future_power.unsqueeze(2))
+            loss = loss_function(predicted_power, future_power.unsqueeze(2))
 
-            batch_loss = loss.item()
-            # loss_sum += batch_loss
-            loss_sum_epoch += batch_loss
-
-            # if (train_i+1) % 100 == 0:
-            #     print(f"Epoch: {epoch_i}, Step: {train_i}, Train Loss (last 100): {loss_sum/100:.4f}")
-            #     loss_sum = 0   # 清零局部统计
+            loss_sum_epoch += loss.item()
 
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=10.0)
@@ -124,7 +110,7 @@ def train_val(cfg):
 
         train_loss = loss_sum_epoch / len(train_dataloader)
         print(f"[Epoch {epoch_i}] Train Loss (avg): {train_loss:.4f}")
-        writer.add_scalar("Loss/train_epoch", train_loss, epoch_i)
+        writer.add_scalar("Loss/train", train_loss, epoch_i)
 
         scheduler.step()
 
@@ -174,50 +160,63 @@ def train_val(cfg):
         # 获取当前学习率
         lr = optimizer.param_groups[0]['lr']
 
-        # 只在 rank=0 打印 & 保存
+        # 打印和记录指标
         print(f"[Epoch {epoch_i}] LR: {lr:.6f} | Val Loss: {val_loss:.4f} | Val MAE: {val_mae:.4f} | Val ACC MAE: {val_acc_mae:.4f} | Val ACC RMSE: {val_acc_rmse:.4f}")
-        writer.add_scalar("val_loss", val_loss, epoch_i)
-        writer.add_scalar("val_mae", val_mae, epoch_i)
-        writer.add_scalar("val_acc_mae", val_acc_mae, epoch_i)
-        writer.add_scalar("Val/Acc_RMSE", val_acc_rmse, epoch_i)
+        writer.add_scalar("Loss/val", val_loss, epoch_i)
+        writer.add_scalar("Metric/val_mae", val_mae, epoch_i)
+        writer.add_scalar("Metric/val_acc_mae", val_acc_mae, epoch_i)
+        writer.add_scalar("Metric/val_acc_rmse", val_acc_rmse, epoch_i)
+        writer.add_scalar("LearningRate", lr, epoch_i)
 
 
+        # 保存最新的检查点
         checkpoint = {
-                'epoch': epoch_i,
-                'model_state_dict': model.state_dict(),
-                'optimizer_state_dict': optimizer.state_dict(),
-                'scheduler_state_dict': scheduler.state_dict(),
-                'val_loss': val_loss
-            }
-        torch.save(checkpoint, f"checkpoint_epoch{epoch_i}.pth")
+            'epoch': epoch_i,
+            'model_state_dict': model.state_dict(),
+            'optimizer_state_dict': optimizer.state_dict(),
+            'scheduler_state_dict': scheduler.state_dict(),
+            'val_loss': val_loss,
+            'patience_counter': patience_counter
+        }
+        torch.save(checkpoint, "checkpoint_latest.pth")
 
+        # 保存最佳检查点和早停机制
         if val_loss < best_val_loss:
-                best_val_loss = val_loss
-                torch.save(checkpoint, f"best_checkpoint_epoch{epoch_i}.pth")
-                print(f" Saved checkpoint at epoch {epoch_i} (Val Loss: {val_loss:.4f})")
+            best_val_loss = val_loss
+            patience_counter = 0
+            torch.save(checkpoint, "best_checkpoint.pth")
+            print(f"✓ Saved best checkpoint at epoch {epoch_i} (Val Loss: {val_loss:.4f})")
+        else:
+            patience_counter += 1
+            print(f"  No improvement for {patience_counter} epoch(s)")
+
+        # 早停检查
+        if patience_counter >= patience:
+            print(f"\nEarly stopping triggered after {patience} epochs without improvement")
+            print(f"Best Val Loss: {best_val_loss:.4f}")
+            break
 
 
 
 def parse_cfg():
-    parser = argparse.ArgumentParser()
-    parser.add_argument('--epochs', type=int, default=100)
-    parser.add_argument('--device', type=str, default='0')
-    parser.add_argument('--data-path', type=str, default='data.csv')
-    parser.add_argument('--batch-size', type=int, default=48)
-    parser.add_argument('--num-workers', type=int, default=4)
-    parser.add_argument('--lr-init', type=float, default=0.1)
-    parser.add_argument('--lr-final', type=float, default=0.0001)
-    parser.add_argument('--in-seq-len', type=int, default=240)
-    parser.add_argument('--out-seq-len', type=int, default=48)
-    parser.add_argument('--in-feat-size', type=int, default=3)
-    parser.add_argument('--out-feat-size', type=int, default=1)
-    parser.add_argument('--hidden-feat-size', type=int, default=256)
-    parser.add_argument('--subset', type=float, default=1)
-    parser.add_argument('--resume', type=str, default='')
+    parser = argparse.ArgumentParser(description='Train Transformer model for power forecasting')
+    parser.add_argument('--epochs', type=int, default=100, help='Number of training epochs')
+    parser.add_argument('--device', type=str, default='0', help='GPU device ID or "cpu"')
+    parser.add_argument('--data-path', type=str, default='data.csv', help='Path to training data CSV file')
+    parser.add_argument('--batch-size', type=int, default=48, help='Batch size for training')
+    parser.add_argument('--num-workers', type=int, default=4, help='Number of data loading workers')
+    parser.add_argument('--lr-init', type=float, default=0.001, help='Initial learning rate for AdamW')
+    parser.add_argument('--lr-final', type=float, default=0.0001, help='Final learning rate after decay')
+    parser.add_argument('--in-seq-len', type=int, default=240, help='Input sequence length')
+    parser.add_argument('--out-seq-len', type=int, default=48, help='Output sequence length')
+    parser.add_argument('--in-feat-size', type=int, default=3, help='Input feature size')
+    parser.add_argument('--out-feat-size', type=int, default=1, help='Output feature size')
+    parser.add_argument('--hidden-feat-size', type=int, default=256, help='Hidden feature size')
+    parser.add_argument('--subset', type=float, default=1.0, help='Subset of data to use (0-1)')
+    parser.add_argument('--resume', type=str, default='', help='Path to checkpoint to resume from')
     return parser.parse_args()
 
 
 if __name__ == '__main__':
     cfg = parse_cfg()
-    #Power_Dataset(cfg)
     train_val(cfg)
