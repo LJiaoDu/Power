@@ -130,8 +130,9 @@ def train_val(cfg):
 
         # 验证
         model.eval()
-        val_loss, val_mae, val_acc = 0, 0, 0
-        valid_batches = 0
+        val_loss, val_mae = 0, 0
+        val_acc_mae, val_acc_rmse = 0, 0
+        valid_batches, valid_batches_mae = 0, 0
 
         with torch.no_grad():
             pbar = tqdm(val_dataloader, desc=f"Epoch {epoch_i} [Val]", ncols=120)
@@ -169,10 +170,12 @@ def train_val(cfg):
         val_mae /= len(val_dataloader)
         val_acc_mae  = val_acc_mae / valid_batches_mae if valid_batches_mae > 0 else float('nan')
         val_acc_rmse = val_acc_rmse / valid_batches if valid_batches > 0 else float('nan')
-   
+
+        # 获取当前学习率
+        lr = optimizer.param_groups[0]['lr']
 
         # 只在 rank=0 打印 & 保存
-        print(f"[Epoch {epoch_i}] LR: {lr:.6f} | Val Loss: {val_loss:.4f} | Val MAE: {val_mae:.4f} | Val ACC: {val_acc:.4f}")
+        print(f"[Epoch {epoch_i}] LR: {lr:.6f} | Val Loss: {val_loss:.4f} | Val MAE: {val_mae:.4f} | Val ACC MAE: {val_acc_mae:.4f} | Val ACC RMSE: {val_acc_rmse:.4f}")
         writer.add_scalar("val_loss", val_loss, epoch_i)
         writer.add_scalar("val_mae", val_mae, epoch_i)
         writer.add_scalar("val_acc_mae", val_acc_mae, epoch_i)
