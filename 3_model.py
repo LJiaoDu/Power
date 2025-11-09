@@ -35,19 +35,30 @@ def generate_square_subsequent_mask(sz):
 
 # 位置编码
 def _rope_cos_sin(seq_len: int, dim: int, device, dtype, base: float = 10000.0):
+    """
+    计算RoPE位置编码的cos和sin值
+    标准公式: theta_i = base^(-2i/d), 其中 i = 0, 1, ..., d/2-1
+    """
     assert dim % 2 == 0, "RoPE 维度必须为偶数"
     half = dim // 2
-    inv_freq = 1.0 / (base ** (torch.arange(0, half, device=device, dtype=dtype) / half))
+    # 修复：除以完整维度 dim，而不是 half
+    inv_freq = 1.0 / (base ** (2 * torch.arange(0, half, device=device, dtype=dtype) / dim))
     t = torch.arange(seq_len, device=device, dtype=dtype)
-    freqs = torch.einsum('l,d->ld', t, inv_freq)
-    emb = torch.cat([freqs, freqs], dim=-1).unsqueeze(0).unsqueeze(0)
+    freqs = torch.einsum('l,d->ld', t, inv_freq)  # [seq_len, half]
+    # 修复：不需要 cat，直接返回
+    emb = freqs.unsqueeze(0).unsqueeze(0)  # [1, 1, seq_len, half]
     return emb.cos(), emb.sin()
 
 def _apply_rope(x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor):
-    x_even = x[..., ::2]
-    x_odd = x[..., 1::2]
-    x_rope_even = x_even * cos[..., ::2] - x_odd * sin[..., ::2]
-    x_rope_odd = x_odd * cos[..., ::2] + x_even * sin[..., ::2]
+    """
+    应用RoPE旋转变换
+    旋转矩阵: [[cos, -sin], [sin, cos]]
+    """
+    x_even = x[..., ::2]   # 偶数位置
+    x_odd = x[..., 1::2]   # 奇数位置
+    # 修复：标准旋转公式，不需要 [..., ::2] 索引
+    x_rope_even = x_even * cos - x_odd * sin
+    x_rope_odd = x_even * sin + x_odd * cos  # 修复：x_even 在前
     out = torch.empty_like(x)
     out[..., ::2] = x_rope_even
     out[..., 1::2] = x_rope_odd
