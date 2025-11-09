@@ -62,18 +62,12 @@ class TFMModel(nn.Module):
         self.in_seq_len = cfg.in_seq_len
         self.out_seq_len = cfg.out_seq_len
         self.hidden_feat_size = cfg.hidden_feat_size
+        self.nhead = 8
+        self.rope_base = 10000.0
 
         encoder_layer = EncoderLayer(d_model=self.hidden_feat_size, nhead=8, batch_first=True) # 单层多头自注意力
         encoder_norm = LayerNorm(self.hidden_feat_size)
         self.encoder = Encoder(encoder_layer, 6, encoder_norm)                         # transformer编码器
-
-        encoder_layer1 = EncoderLayer(d_model=self.hidden_feat_size, nhead=8, batch_first=True) # 单层多头自注意力
-        encoder_norm1 = LayerNorm(self.hidden_feat_size)
-        self.encoder1 = Encoder(encoder_layer1, 6, encoder_norm1)                         # transformer编码器
-
-        encoder_layer2 = EncoderLayer(d_model=self.hidden_feat_size, nhead=8, batch_first=True) # 单层多头自注意力
-        encoder_norm2 = LayerNorm(self.hidden_feat_size)
-        self.encoder2 = Encoder(encoder_layer2, 6, encoder_norm2)                         # transformer编码器
 
         decoder_layer = DecoderLayer(d_model=self.hidden_feat_size, nhead=8, batch_first=True) # 单层多头自注意力
         decoder_norm = LayerNorm(self.hidden_feat_size)
@@ -83,24 +77,12 @@ class TFMModel(nn.Module):
         self.embedding_fc = nn.Linear(self.in_feat_size, self.hidden_feat_size)
         self.embedding_fc_t = nn.Linear(self.out_feat_size, self.hidden_feat_size)
 
-
-        # self.pos = position_encode(self.hidden_feat_size, self.in_seq_len)
-        # self.pos_t = position_encode(self.hidden_feat_size, self.out_seq_len)
-        self.tgt_mask = generate_square_subsequent_mask(self.out_seq_len)
-
         self.dropout = nn.Dropout(0.1)
 
         self.fc = nn.Linear(self.hidden_feat_size, self.out_feat_size)
-        self.fc1 = nn.Linear(self.in_seq_len * self.hidden_feat_size, self.out_seq_len * self.out_feat_size)
 
-    
+
     def forward_loop(self, x: torch.Tensor, t: torch.Tensor) -> torch.Tensor:
-        #bos = torch.zeros(x.size(0), 1, self.out_feat_size).to(x.device)
-        #x = torch.concat((bos,x), dim=1)
-        #t = x[:, -1:]
-        # self.pos = self.pos.to(x.device)
-        # self.pos_t = self.pos_t.to(x.device)
-
         x = self.embedding_fc(x)  # 对编码器的输入x进行embedding
         B, L, H = x.shape
         x = x.view(B, L, self.nhead, H // self.nhead).transpose(1, 2).contiguous()
@@ -133,16 +115,25 @@ class TFMModel(nn.Module):
         return t[:,1:]
 
 
-        
+
     def forward(self, x: torch.Tensor, t: torch.Tensor) -> torch.Tensor:
-        # return self.forward_loop(x, t)
         return self.forward_loop(x, t)
     
-# 测试 
+# 测试
 if __name__ == '__main__':
     device = torch.device('cpu')
 
-    model = TFMModel(in_seq_len=240, out_seq_len=48, in_feat_size = 3, out_feat_size = 1, hidden_feat_size = 64, device=device).to(device=device)
+    # 创建配置对象
+    class Config:
+        def __init__(self):
+            self.in_seq_len = 240
+            self.out_seq_len = 48
+            self.in_feat_size = 3
+            self.out_feat_size = 1
+            self.hidden_feat_size = 64
+
+    cfg = Config()
+    model = TFMModel(cfg).to(device=device)
     optimizer = torch.optim.SGD(model.parameters(), lr=0.1)
 
     src = torch.rand(2, 240, 3).to(device=device)
@@ -151,11 +142,9 @@ if __name__ == '__main__':
 
     loss_f = nn.MSELoss()
 
+    model.train()
     for i in range(10):
         optimizer.zero_grad()
-        model.eval()
-        tgt = model(src, tgt)
-        model.train()
         out = model(src, tgt)
         loss = loss_f(out, y)
         print(loss.item())
