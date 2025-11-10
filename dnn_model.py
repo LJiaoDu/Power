@@ -94,36 +94,46 @@ class TFMModel(nn.Module):
 
 
     def forward_loop(self, x: torch.Tensor, t: torch.Tensor) -> torch.Tensor:
+        # 编码器处理
         x = self.embedding_fc(x)  # 对编码器的输入x进行embedding
         B, L, H = x.shape
+
+        # 对encoder输入应用RoPE
         x = x.view(B, L, self.nhead, H // self.nhead).transpose(1, 2).contiguous()
         dim = H // self.nhead
         cos, sin = _rope_cos_sin(L, dim, device=x.device, dtype=x.dtype, base=self.rope_base)
         x = _apply_rope(x, cos, sin)
         x = x.transpose(1, 2).contiguous().view(B, L, H)
-        x = self.dropout(x)      # dropout
-        x = self.encoder(x)         # transformer编码
+
+        x = self.dropout(x)
+        x = self.encoder(x)  # [B, L, H]
+
+        # 解码器自回归生成
         B = x.size(0)
-        bos = torch.zeros(B, 1, self.out_feat_size, device=x.device)
-        t_in = bos
-        outs = []
-        t = torch.zeros(x.size(0), 1, self.out_feat_size).to(x.device)
+        # 初始化：从零向量开始
+        t = torch.zeros(B, 1, self.out_feat_size, device=x.device)
+
         for i in range(self.out_seq_len):
             B, L_cur, _ = t.shape
-            ti = self.embedding_fc_t(t)             # 对解码器的输入t进行embedding
+            ti = self.embedding_fc_t(t)  # [B, L_cur, H]
 
+            # 对decoder输入应用RoPE
             H = ti.shape[-1]
             ti = ti.view(B, L_cur, self.nhead, H // self.nhead).transpose(1, 2).contiguous()
             dim = H // self.nhead
             cos, sin = _rope_cos_sin(L_cur, dim, device=ti.device, dtype=ti.dtype, base=self.rope_base)
             ti = _apply_rope(ti, cos, sin)
-            ti = ti.transpose(1, 2).contiguous().view(B, L_cur, H)           # 加上位置码
-            ti = self.dropout(ti)                   # dropout
-            ti = self.decoder(ti, x)                # transformer解码
-            ti = self.fc(ti)                        # 线性层，生成预测点
-            # print(ti.detach().cpu().numpy())
-            t = torch.concat((t,ti[:,i:]), dim=1)   # 将新生成的点加入预测序列
-        return t[:,1:]
+            ti = ti.transpose(1, 2).contiguous().view(B, L_cur, H)
+
+            ti = self.dropout(ti)
+            ti = self.decoder(ti, x)  # [B, L_cur, H]
+            ti = self.fc(ti)  # [B, L_cur, out_feat_size]
+
+            # 修复：每次只取最后一个预测，而不是ti[:,i:]
+            next_token = ti[:, -1:, :]  # [B, 1, out_feat_size]
+            t = torch.cat((t, next_token), dim=1)  # 拼接到序列
+
+        return t[:, 1:]  # 移除初始的零向量，返回[B, out_seq_len, out_feat_size]
 
 
 

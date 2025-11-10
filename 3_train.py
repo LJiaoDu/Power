@@ -1,4 +1,5 @@
 import torch
+from torch import nn
 from torch.utils.data import Dataset, DataLoader
 from dnn_model import TFMModel as Model
 from tqdm import tqdm
@@ -57,15 +58,24 @@ def train_val(cfg):
     val_dataloader = DataLoader(val_data, batch_size=cfg.batch_size, shuffle=False, num_workers=cfg.num_workers, pin_memory=True)
 
     model = Model(cfg).to(device)
-    optimizer = torch.optim.AdamW(model.parameters(), lr=cfg.lr_init)
 
-    # 学习率衰减策略：warmup + cosine annealing
-    warmup_epochs = 5
+    # 初始化权重（重要：帮助训练稳定）
+    def init_weights(m):
+        if isinstance(m, nn.Linear):
+            torch.nn.init.xavier_uniform_(m.weight, gain=0.5)  # 更小的初始化
+            if m.bias is not None:
+                torch.nn.init.zeros_(m.bias)
+    model.apply(init_weights)
+
+    optimizer = torch.optim.AdamW(model.parameters(), lr=cfg.lr_init, weight_decay=0.01)
+
+    # 学习率衰减策略：更温和的warmup + cosine annealing
+    warmup_epochs = 10  # 增加warmup轮数
     main_epochs = cfg.epochs - warmup_epochs
     scheduler = SequentialLR(
         optimizer,
         schedulers=[
-            LinearLR(optimizer, start_factor=0.1, end_factor=1.0, total_iters=warmup_epochs),
+            LinearLR(optimizer, start_factor=0.01, end_factor=1.0, total_iters=warmup_epochs),  # 从更小的lr开始
             CosineAnnealingLR(optimizer, T_max=main_epochs, eta_min=cfg.lr_final)
         ],
         milestones=[warmup_epochs])
@@ -104,7 +114,8 @@ def train_val(cfg):
             loss_sum_epoch += loss.item()
 
             loss.backward()
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=10.0)
+            # 更严格的梯度裁剪，防止梯度爆炸
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             optimizer.step()
             pbar.set_postfix(batch_loss=loss.item())
 
@@ -205,8 +216,8 @@ def parse_cfg():
     parser.add_argument('--data-path', type=str, default='data.csv', help='Path to training data CSV file')
     parser.add_argument('--batch-size', type=int, default=48, help='Batch size for training')
     parser.add_argument('--num-workers', type=int, default=4, help='Number of data loading workers')
-    parser.add_argument('--lr-init', type=float, default=0.001, help='Initial learning rate for AdamW')
-    parser.add_argument('--lr-final', type=float, default=0.0001, help='Final learning rate after decay')
+    parser.add_argument('--lr-init', type=float, default=0.0005, help='Initial learning rate for AdamW (conservative)')
+    parser.add_argument('--lr-final', type=float, default=0.00001, help='Final learning rate after decay')
     parser.add_argument('--in-seq-len', type=int, default=240, help='Input sequence length')
     parser.add_argument('--out-seq-len', type=int, default=48, help='Output sequence length')
     parser.add_argument('--in-feat-size', type=int, default=3, help='Input feature size')
