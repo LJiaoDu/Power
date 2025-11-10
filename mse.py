@@ -27,14 +27,13 @@ A_power = data_power[split_idx:]
 print(f"训练集 B 长度: {len(B_date)}")
 print(f"验证集 A 长度: {len(A_date)}")
 
-# 归一化（使用训练集B的统计量，确保B和A在同一尺度）
-B_date_min, B_date_max = B_date.min(), B_date.max()
-B_time_min, B_time_max = B_time.min(), B_time.max()
-
-B_date = (B_date - B_date_min) / (B_date_max - B_date_min + 1e-8)
-B_time = (B_time - B_time_min) / (B_time_max - B_time_min + 1e-8)
-A_date = (A_date - B_date_min) / (B_date_max - B_date_min + 1e-8)
-A_time = (A_time - B_time_min) / (B_time_max - B_time_min + 1e-8)
+# date和time已经是归一化的周期性特征（0-1范围），无需再次归一化
+# date: 7月2日=1, 1月1日=0（抛物线模拟季节）
+# time: 中午12点=1（一天288个点，第144点为1）
+print(f"训练集 date 范围: [{B_date.min():.4f}, {B_date.max():.4f}]")
+print(f"训练集 time 范围: [{B_time.min():.4f}, {B_time.max():.4f}]")
+print(f"验证集 date 范围: [{A_date.min():.4f}, {A_date.max():.4f}]")
+print(f"验证集 time 范围: [{A_time.min():.4f}, {A_time.max():.4f}]")
 
 # ===== 转为 tensor =====
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -82,9 +81,10 @@ for sample_idx in tqdm(range(num_A_samples), desc="预测进度"):
     A_target_power = A_power_t[sample_idx + INPUT_LEN : sample_idx + TOTAL_LEN]  # [48]
 
     # 计算该样本与所有训练窗口的时间相似度（MSE）
-    # 只使用time列匹配，因为date是递增的，验证集的日期不在训练集范围内
+    # 同时使用date（季节）和time（时刻）进行匹配
+    diff_date = B_date_input - A_input_date.unsqueeze(0)  # [num_windows, 240]
     diff_time = B_time_input - A_input_time.unsqueeze(0)  # [num_windows, 240]
-    mse_time = (diff_time ** 2).mean(dim=1)  # [num_windows]
+    mse_time = ((diff_date ** 2) + (diff_time ** 2)).mean(dim=1)  # [num_windows]
 
     # 找到最相似的训练窗口
     best_idx = torch.argmin(mse_time).item()
