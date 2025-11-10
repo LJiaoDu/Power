@@ -82,9 +82,9 @@ for sample_idx in tqdm(range(num_A_samples), desc="预测进度"):
     A_target_power = A_power_t[sample_idx + INPUT_LEN : sample_idx + TOTAL_LEN]  # [48]
 
     # 计算该样本与所有训练窗口的时间相似度（MSE）
-    diff_date = B_date_input - A_input_date.unsqueeze(0)  # [num_windows, 240]
+    # 只使用time列匹配，因为date是递增的，验证集的日期不在训练集范围内
     diff_time = B_time_input - A_input_time.unsqueeze(0)  # [num_windows, 240]
-    mse_time = ((diff_date ** 2) + (diff_time ** 2)).mean(dim=1)  # [num_windows]
+    mse_time = (diff_time ** 2).mean(dim=1)  # [num_windows]
 
     # 找到最相似的训练窗口
     best_idx = torch.argmin(mse_time).item()
